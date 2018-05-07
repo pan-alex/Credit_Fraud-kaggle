@@ -3,8 +3,10 @@
 Alex Pan
 
 -   [1. Libraries](#libraries)
--   [2. Defining Functions](#defining-functions)
--   [3. Load in Data](#load-in-data)
+    -   [Libraries](#libraries-1)
+    -   [Session Info](#session-info)
+    -   [Custom Functions](#custom-functions)
+-   [2. Load in Data](#load-in-data)
     -   [Data structure and Descriptive Stats:](#data-structure-and-descriptive-stats)
     -   [Missingness](#missingness)
 -   [3. Descriptive Stats](#descriptive-stats)
@@ -29,19 +31,83 @@ Data from <a href = https://www.kaggle.com/mlg-ulb/creditcardfraud/data>Kaggle</
 1. Libraries
 ------------
 
+### Libraries
+
 ``` r
+set.seed(123456)
+
 library(tidyverse)
 theme_set(theme_bw())
-library(caret)
-library(corrplot)
+library(keras)
+library(tensorflow)
+tf$set_random_seed(123456)
+library(caret)    # Note: needs to be loaded in after tensorflow
 library(gridExtra)
-
-
-set.seed(123456)
+library(DMwR)
 ```
 
-2. Defining Functions
----------------------
+### Session Info
+
+``` r
+sessionInfo()
+```
+
+    R version 3.5.0 (2018-04-23)
+    Platform: x86_64-w64-mingw32/x64 (64-bit)
+    Running under: Windows 10 x64 (build 16299)
+
+    Matrix products: default
+
+    locale:
+    [1] LC_COLLATE=English_Canada.1252  LC_CTYPE=English_Canada.1252   
+    [3] LC_MONETARY=English_Canada.1252 LC_NUMERIC=C                   
+    [5] LC_TIME=English_Canada.1252    
+
+    attached base packages:
+    [1] grid      stats     graphics  grDevices utils     datasets  methods  
+    [8] base     
+
+    other attached packages:
+     [1] DMwR_0.4.1      gridExtra_2.3   caret_6.0-79    lattice_0.20-35
+     [5] tensorflow_1.5  keras_2.1.6     forcats_0.3.0   stringr_1.3.0  
+     [9] dplyr_0.7.4     purrr_0.2.4     readr_1.1.1     tidyr_0.8.0    
+    [13] tibble_1.4.2    ggplot2_2.2.1   tidyverse_1.2.1
+
+    loaded via a namespace (and not attached):
+     [1] nlme_3.1-137       bitops_1.0-6       xts_0.10-2        
+     [4] lubridate_1.7.4    dimRed_0.1.0       httr_1.3.1        
+     [7] rprojroot_1.3-2    tools_3.5.0        backports_1.1.2   
+    [10] R6_2.2.2           KernSmooth_2.23-15 rpart_4.1-13      
+    [13] lazyeval_0.2.1     colorspace_1.3-2   nnet_7.3-12       
+    [16] withr_2.1.2        tidyselect_0.2.4   mnormt_1.5-5      
+    [19] curl_3.2           compiler_3.5.0     cli_1.0.0         
+    [22] rvest_0.3.2        xml2_1.2.0         caTools_1.17.1    
+    [25] scales_0.5.0       sfsmisc_1.1-2      DEoptimR_1.0-8    
+    [28] psych_1.8.3.3      robustbase_0.93-0  tfruns_1.3        
+    [31] digest_0.6.15      foreign_0.8-70     rmarkdown_1.9     
+    [34] base64enc_0.1-3    pkgconfig_2.0.1    htmltools_0.3.6   
+    [37] TTR_0.23-3         rlang_0.2.0        readxl_1.1.0      
+    [40] ddalpha_1.3.3      quantmod_0.4-13    rstudioapi_0.7    
+    [43] bindr_0.1.1        zoo_1.8-1          jsonlite_1.5      
+    [46] gtools_3.5.0       ModelMetrics_1.1.0 magrittr_1.5      
+    [49] Matrix_1.2-14      Rcpp_0.12.16       munsell_0.4.3     
+    [52] abind_1.4-5        reticulate_1.7     stringi_1.1.7     
+    [55] whisker_0.3-2      yaml_2.1.18        MASS_7.3-49       
+    [58] gplots_3.0.1       plyr_1.8.4         recipes_0.1.2     
+    [61] gdata_2.18.0       parallel_3.5.0     crayon_1.3.4      
+    [64] haven_1.1.1        splines_3.5.0      hms_0.4.2         
+    [67] zeallot_0.1.0      knitr_1.20         pillar_1.2.2      
+    [70] reshape2_1.4.3     codetools_0.2-15   stats4_3.5.0      
+    [73] CVST_0.2-1         magic_1.5-8        glue_1.2.0        
+    [76] evaluate_0.10.1    modelr_0.1.1       foreach_1.4.4     
+    [79] cellranger_1.1.0   gtable_0.2.0       kernlab_0.9-26    
+    [82] assertthat_0.2.0   DRR_0.0.3          gower_0.1.2       
+    [85] prodlim_2018.04.18 broom_0.4.4        class_7.3-14      
+    [88] survival_2.41-3    geometry_0.3-6     timeDate_3043.102 
+    [91] RcppRoll_0.2.2     iterators_1.0.9    bindrcpp_0.2.2    
+    [94] lava_1.6.1         ROCR_1.0-7         ipred_0.9-6       
+
+### Custom Functions
 
 ``` r
 # Chosen at random
@@ -58,7 +124,7 @@ test.class <- function(model, test=credit_dev, cl=credit_dev$Class, positive = "
 scaleFUN <- function(x) sprintf("%.2f", x)
 ```
 
-3. Load in Data
+2. Load in Data
 ---------------
 
 These data are all PCA variables (i.e., these are not the actual variables)
@@ -101,7 +167,7 @@ glimpse(credit)
     $ V27    <dbl> 0.1335584, -0.0089831, -0.0553528, 0.0627228, 0.2194222...
     $ V28    <dbl> -0.02105305, 0.01472417, -0.05975184, 0.06145763, 0.215...
     $ Amount <dbl> 149.62, 2.69, 378.66, 123.50, 69.99, 3.67, 4.99, 40.80,...
-    $ Class  <fctr> 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, ...
+    $ Class  <fct> 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0...
 
 ------------------------------------------------------------------------
 
@@ -154,7 +220,7 @@ p2 <- ggplot(credit) +
 grid.arrange(p1, p2, ncol = 2)
 ```
 
-![](C:\Users\Alex\Documents\R\Credit_Fraud-Kaggle\Outputs\2018-05-02_Kaggle_Credit_Fraud_files/figure-markdown_github/unnamed-chunk-8-1.png)
+![](C:\Users\Alex\Documents\R\Credit_Fraud-Kaggle\Outputs\2018-05-02_Kaggle_Credit_Fraud_files/figure-markdown_github/unnamed-chunk-9-1.png)
 
 Time is described as *Number of seconds elapsed between each transaction (over two days)*. I'm not 100% clear on what this means, but judging from the bimodal pattern plotted below I would suspect that data collection began around midnight and continued for 48 hours.
 
@@ -173,7 +239,7 @@ p2 <- ggplot(credit) +
 grid.arrange(p1, p2, ncol = 2)
 ```
 
-![](C:\Users\Alex\Documents\R\Credit_Fraud-Kaggle\Outputs\2018-05-02_Kaggle_Credit_Fraud_files/figure-markdown_github/unnamed-chunk-9-1.png)
+![](C:\Users\Alex\Documents\R\Credit_Fraud-Kaggle\Outputs\2018-05-02_Kaggle_Credit_Fraud_files/figure-markdown_github/unnamed-chunk-10-1.png)
 
 ------------------------------------------------------------------------
 
@@ -193,7 +259,7 @@ ggplot(credit) +
     scale_x_continuous(minor_breaks = seq(0, 180000, 3600))
 ```
 
-![](C:\Users\Alex\Documents\R\Credit_Fraud-Kaggle\Outputs\2018-05-02_Kaggle_Credit_Fraud_files/figure-markdown_github/unnamed-chunk-10-1.png)
+![](C:\Users\Alex\Documents\R\Credit_Fraud-Kaggle\Outputs\2018-05-02_Kaggle_Credit_Fraud_files/figure-markdown_github/unnamed-chunk-11-1.png)
 
 ------------------------------------------------------------------------
 
@@ -279,7 +345,6 @@ model_automate_rf <- function(data_,
     kappas = data.frame(mtry = NA, set = NA, kappa = NA)
     
     for (mtry in m_try){
-        set.seed(123456)
         fit_rf <- train(Class ~ . -Time,
                         data = data_,
                         method = 'rf',
@@ -1281,7 +1346,6 @@ Recall that my 'no sampling' dataset still involves a subset of the original dat
 Logistic regression using all of the features has very poor PPV / Kappa.
 
 ``` r
-set.seed(123456)
 fit_logistic <- train(Class ~ . - Time,
                       data = credit_train_oversampled,
                       method = 'glm',
@@ -1300,8 +1364,8 @@ Note this warning messsage:
 print(fit_logistic$results)
 ```
 
-      parameter Accuracy   Kappa AccuracySD   KappaSD
-    1      none  0.95232 0.90464  0.0026006 0.0052012
+      parameter Accuracy Kappa AccuracySD    KappaSD
+    1      none    0.952 0.904 0.00354877 0.00709753
 
 ``` r
 test.class(fit_logistic)
@@ -1340,7 +1404,7 @@ plot(varImp(fit_logistic))
 
 #### 6.1.2 Penalized Logistic Regression
 
-Unpenalized regression is overfitting the data (except it is optimizing overall accuracy rather than Kappa). It's also running into issues where some variables offer complete separation of the groups.
+Unpenalized regression is overfitting the data (except it is optimizing overall accuracy rather than Kappa). It's also running into issues where some variables offer complete separation of the groups (hence the warnings).
 
 I'm going to try penalized logistic regression (L2 norm) as a potential solution.
 
@@ -1355,7 +1419,7 @@ kappas <- data.frame(lambda = NA, set = NA, kappa = NA)
 
 for (lambda in c(1, 100, 1000, 10000, 100000)){
     grid_plr <- expand.grid(lambda = lambda, cp = 'bic')
-    set.seed(123456)
+    
     fit_logistic <- train(Class ~ . - Time,
                           data = credit_train_oversampled,
                           method = 'plr',
@@ -1533,8 +1597,6 @@ p1
 Prepare data in the proper format for a neural net:
 
 ``` r
-library(keras)
-
 # Scale the training data
 credit_train_oversampled_scaled <- credit_train_oversampled %>%
     mutate(Amount = (Amount - mean(Amount)) / sd(Amount),
@@ -1582,7 +1644,7 @@ model %>% compile(
         optimizer = optimizer_rmsprop(),
         metrics = c('accuracy'))
 
-set.seed(123456)
+
 fit_nn <- model %>% 
     fit(x_train,
         y_train,
@@ -1602,8 +1664,8 @@ table(predicted = model %>% predict_classes(x_train), true = y_train)
 
              true
     predicted    0    1
-            0 9933  282
-            1   67 9718
+            0 9951  134
+            1   49 9866
 
 Predictions:
 
@@ -1612,10 +1674,10 @@ model %>% evaluate(x_dev, y_dev)
 ```
 
     $loss
-    [1] 0.025815
+    [1] 0.0214274
 
     $acc
-    [1] 0.99279
+    [1] 0.994429
 
 ``` r
 table(predicted = model %>% predict_classes(x_dev), true = y_dev)
@@ -1623,10 +1685,10 @@ table(predicted = model %>% predict_classes(x_dev), true = y_dev)
 
              true
     predicted     0     1
-            0 42323     4
-            1   304    90
+            0 42393     4
+            1   234    90
 
-##### 6.1.1.2 v2 16x8x1, 50 epochs
+##### 6.1.1.2 v2 16x8x8x1, 50 epochs
 
 I've increased the number of epochs. *I did try increasing the learning rate, but it caused problems with convergence*
 
@@ -1641,6 +1703,8 @@ model_oversampled2 %>%
     layer_dropout(rate = 0.5) %>%
     layer_dense(units = 8, activation = 'relu') %>%
     layer_dropout(rate = 0.25) %>%
+    layer_dense(units = 8, activation = 'relu') %>%
+    layer_dropout(rate = 0.25) %>%
     layer_dense(units = 1, activation = 'sigmoid')
 ```
 
@@ -1652,7 +1716,7 @@ model_oversampled2 %>% compile(
         optimizer = optimizer_rmsprop(),
         metrics = c('accuracy'))
 
-set.seed(123456)
+
 fit_nn <- model_oversampled2 %>% 
     fit(x_train,
         y_train,
@@ -1672,29 +1736,29 @@ table(predicted = model_oversampled2 %>% predict_classes(x_train), true = y_trai
 
              true
     predicted    0    1
-            0 9965  188
-            1   35 9812
+            0 9946  189
+            1   54 9811
 
 Predictions:
 
 ``` r
-model %>% evaluate(x_dev, y_dev)
+model_oversampled2 %>% evaluate(x_dev, y_dev)
 ```
 
     $loss
-    [1] 0.025815
+    [1] 0.0239783
 
     $acc
-    [1] 0.99279
+    [1] 0.993376
 
 ``` r
-table(predicted = model %>% predict_classes(x_dev), true = y_dev)
+table(predicted = model_oversampled2 %>% predict_classes(x_dev), true = y_dev)
 ```
 
              true
     predicted     0     1
-            0 42323     4
-            1   304    90
+            0 42349     5
+            1   278    89
 
 #### TBC
 
@@ -1711,8 +1775,6 @@ table(predicted = model %>% predict_classes(x_dev), true = y_dev)
 Prepare data in the proper format for a neural net:
 
 ``` r
-library(keras)
-
 # Scale the training data
 credit_train_nosample_scaled <- credit_train_nosample %>%
     mutate(Amount = (Amount - mean(Amount)) / sd(Amount),
@@ -1766,7 +1828,7 @@ model %>% compile(
         optimizer = optimizer_rmsprop(),
         metrics = c('accuracy'))
 
-set.seed(123456)
+
 fit_nn <- model %>% 
     fit(x_train,
         y_train,
@@ -1786,8 +1848,8 @@ table(predicted = model %>% predict_classes(x_train), true = y_train)
 
              true
     predicted     0     1
-            0 19969    12
-            1     3    16
+            0 19969     6
+            1     3    22
 
 Predictions:
 
@@ -1796,10 +1858,10 @@ model %>% evaluate(x_dev, y_dev)
 ```
 
     $loss
-    [1] 0.00945729
+    [1] 0.0104488
 
     $acc
-    [1] 0.998642
+    [1] 0.998876
 
 ``` r
 table(predicted = model %>% predict_classes(x_dev), true = y_dev)
@@ -1807,8 +1869,8 @@ table(predicted = model %>% predict_classes(x_dev), true = y_dev)
 
              true
     predicted     0     1
-            0 42607    38
-            1    20    56
+            0 42607    28
+            1    20    66
 
 ##### 6.2.1.2 v1: 16x8x1, unequal weights
 
@@ -1835,10 +1897,10 @@ Training the model:
 ``` r
 model_nn_nosample2 %>% compile(
         loss = 'binary_crossentropy',
-        optimizer = optimizer_rmsprop(lr = 0.0001),
+        optimizer = optimizer_rmsprop(lr = 0.00005),
         metrics = c('accuracy'))
 
-set.seed(123456)
+
 fit_nn <- model_nn_nosample2 %>% 
     fit(x_train,
         y_train,
@@ -1858,8 +1920,8 @@ table(predicted = model_nn_nosample2 %>% predict_classes(x_train), true = y_trai
 
              true
     predicted     0     1
-            0 19972    27
-            1     0     1
+            0 19966     6
+            1     6    22
 
 Predictions:
 
@@ -1868,10 +1930,10 @@ model_nn_nosample2 %>% evaluate(x_dev, y_dev)
 ```
 
     $loss
-    [1] 0.0745244
+    [1] 0.393918
 
     $acc
-    [1] 0.997823
+    [1] 0.999017
 
 ``` r
 table(predicted = model_nn_nosample2 %>% predict_classes(x_dev), true = y_dev)
@@ -1879,8 +1941,8 @@ table(predicted = model_nn_nosample2 %>% predict_classes(x_dev), true = y_dev)
 
              true
     predicted     0     1
-            0 42627    93
-            1     0     1
+            0 42604    19
+            1    23    75
 
 #### TBC
 
@@ -1900,15 +1962,15 @@ summary(model_nn_nosample2)
     ___________________________________________________________________________
     Layer (type)                     Output Shape                  Param #     
     ===========================================================================
-    dense_10 (Dense)                 (None, 16)                    496         
+    dense_11 (Dense)                 (None, 16)                    496         
     ___________________________________________________________________________
-    dropout_7 (Dropout)              (None, 16)                    0           
+    dropout_8 (Dropout)              (None, 16)                    0           
     ___________________________________________________________________________
-    dense_11 (Dense)                 (None, 8)                     136         
+    dense_12 (Dense)                 (None, 8)                     136         
     ___________________________________________________________________________
-    dropout_8 (Dropout)              (None, 8)                     0           
+    dropout_9 (Dropout)              (None, 8)                     0           
     ___________________________________________________________________________
-    dense_12 (Dense)                 (None, 1)                     9           
+    dense_13 (Dense)                 (None, 1)                     9           
     ===========================================================================
     Total params: 641
     Trainable params: 641
@@ -1936,10 +1998,10 @@ model_nn_nosample2 %>% evaluate(x_test, y_test)
 ```
 
     $loss
-    [1] 0.0741578
+    [1] 0.39135
 
     $acc
-    [1] 0.998315
+    [1] 0.999368
 
 ``` r
 table(predicted = model_nn_nosample2 %>% predict_classes(x_test), true = y_test)
@@ -1947,7 +2009,7 @@ table(predicted = model_nn_nosample2 %>% predict_classes(x_test), true = y_test)
 
              true
     predicted     0     1
-            0 42647    72
-            1     0     1
+            0 42642    22
+            1     5    51
 
 This model has high accuracy and pretty good PPV, but fairly poor sensitivity. Its usefulness will depend on whether youu are trying to optimize for sensitivity or positive predictive value. When building this model I didn't make a preference for one metric over the other, but in real life I'm sure we would.

@@ -4,8 +4,8 @@ author: "Alex Pan"
 knit: (function(inputFile, encoding) {
   rmarkdown::render(inputFile, encoding = encoding, output_dir = "../Outputs") })
 output:
-  # github_document:
-  #   toc: yes
+  github_document:
+    toc: yes
   html_document:
     keep_md: true
     theme: spacelab
@@ -25,20 +25,33 @@ options(digits = 6)
 ```
 
 
-## 1. Libraries
+## 1. Libraries {.tabset}
+
+### Libraries
+
 ```{r}
+set.seed(123456)
+
 library(tidyverse)
 theme_set(theme_bw())
-library(caret)
-library(corrplot)
+library(keras)
+library(tensorflow)
+tf$set_random_seed(123456)
+library(caret)    # Note: needs to be loaded in after tensorflow
 library(gridExtra)
-
-
-set.seed(123456)
+library(DMwR)
 ```
 
 
-## 2. Defining Functions
+### Session Info
+
+```{r}
+sessionInfo()
+```
+
+
+
+### Custom Functions
 ```{r}
 # Chosen at random
 test.class <- function(model, test=credit_dev, cl=credit_dev$Class, positive = "1") {
@@ -55,7 +68,7 @@ scaleFUN <- function(x) sprintf("%.2f", x)
 
 ```
 
-## 3. Load in Data {.tabset}
+## 2. Load in Data {.tabset}
 
 These data are all PCA variables (i.e., these are not the actual variables)
 ```{r, include = FALSE}
@@ -235,7 +248,6 @@ model_automate_rf <- function(data_,
     kappas = data.frame(mtry = NA, set = NA, kappa = NA)
     
     for (mtry in m_try){
-        set.seed(123456)
         fit_rf <- train(Class ~ . -Time,
                         data = data_,
                         method = 'rf',
@@ -1248,7 +1260,6 @@ Recall that my 'no sampling' dataset still involves a subset of the original dat
 
 Logistic regression using all of the features has very poor PPV / Kappa.
 ```{r, results = 'hide', warnings = 'hide'}
-set.seed(123456)
 fit_logistic <- train(Class ~ . - Time,
                       data = credit_train_oversampled,
                       method = 'glm',
@@ -1279,7 +1290,7 @@ plot(varImp(fit_logistic))
 
 #### 6.1.2 Penalized Logistic Regression
 
-Unpenalized regression is overfitting the data (except it is optimizing overall accuracy rather than Kappa). It's also running into issues where some variables offer complete separation of the groups.
+Unpenalized regression is overfitting the data (except it is optimizing overall accuracy rather than Kappa). It's also running into issues where some variables offer complete separation of the groups (hence the warnings).
 
 I'm going to try penalized logistic regression (L2 norm) as a potential solution. 
 
@@ -1294,7 +1305,7 @@ kappas <- data.frame(lambda = NA, set = NA, kappa = NA)
 
 for (lambda in c(1, 100, 1000, 10000, 100000)){
     grid_plr <- expand.grid(lambda = lambda, cp = 'bic')
-    set.seed(123456)
+    
     fit_logistic <- train(Class ~ . - Time,
                           data = credit_train_oversampled,
                           method = 'plr',
@@ -1474,7 +1485,6 @@ Prediction     0     1
 Prepare data in the proper format for a neural net:
 
 ```{r}
-library(keras)
 
 # Scale the training data
 credit_train_oversampled_scaled <- credit_train_oversampled %>%
@@ -1525,7 +1535,7 @@ model %>% compile(
         optimizer = optimizer_rmsprop(),
         metrics = c('accuracy'))
 
-set.seed(123456)
+
 fit_nn <- model %>% 
     fit(x_train,
         y_train,
@@ -1554,7 +1564,7 @@ table(predicted = model %>% predict_classes(x_dev), true = y_dev)
 ```
 
 
-##### 6.1.1.2 v2 16x8x1, 50 epochs
+##### 6.1.1.2 v2 16x8x8x1, 50 epochs
 
 I've increased the number of epochs. *I did try increasing the learning rate, but it caused problems with convergence*
 
@@ -1569,6 +1579,8 @@ model_oversampled2 %>%
     layer_dropout(rate = 0.5) %>%
     layer_dense(units = 8, activation = 'relu') %>%
     layer_dropout(rate = 0.25) %>%
+    layer_dense(units = 8, activation = 'relu') %>%
+    layer_dropout(rate = 0.25) %>%
     layer_dense(units = 1, activation = 'sigmoid')
 ```
 
@@ -1580,7 +1592,7 @@ model_oversampled2 %>% compile(
         optimizer = optimizer_rmsprop(),
         metrics = c('accuracy'))
 
-set.seed(123456)
+
 fit_nn <- model_oversampled2 %>% 
     fit(x_train,
         y_train,
@@ -1603,9 +1615,9 @@ table(predicted = model_oversampled2 %>% predict_classes(x_train), true = y_trai
 Predictions:
 
 ```{r}
-model %>% evaluate(x_dev, y_dev)
+model_oversampled2 %>% evaluate(x_dev, y_dev)
 
-table(predicted = model %>% predict_classes(x_dev), true = y_dev)
+table(predicted = model_oversampled2 %>% predict_classes(x_dev), true = y_dev)
 ```
 
 
@@ -1628,7 +1640,7 @@ table(predicted = model %>% predict_classes(x_dev), true = y_dev)
 Prepare data in the proper format for a neural net:
 
 ```{r}
-library(keras)
+
 
 # Scale the training data
 credit_train_nosample_scaled <- credit_train_nosample %>%
@@ -1685,7 +1697,7 @@ model %>% compile(
         optimizer = optimizer_rmsprop(),
         metrics = c('accuracy'))
 
-set.seed(123456)
+
 fit_nn <- model %>% 
     fit(x_train,
         y_train,
@@ -1739,10 +1751,10 @@ Training the model:
 ```{r}
 model_nn_nosample2 %>% compile(
         loss = 'binary_crossentropy',
-        optimizer = optimizer_rmsprop(lr = 0.0001),
+        optimizer = optimizer_rmsprop(lr = 0.00005),
         metrics = c('accuracy'))
 
-set.seed(123456)
+
 fit_nn <- model_nn_nosample2 %>% 
     fit(x_train,
         y_train,
