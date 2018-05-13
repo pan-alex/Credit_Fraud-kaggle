@@ -1,0 +1,1831 @@
+---
+title: "2018-05-02 - Credit Card Fraud"
+author: "Alex Pan"
+knit: (function(inputFile, encoding) {
+  rmarkdown::render(inputFile, encoding = encoding, output_dir = "../Outputs") })
+output:
+  github_document:
+    toc: yes
+  html_document:
+    keep_md: true
+    theme: spacelab
+    toc: yes
+editor_options: 
+  chunk_output_type: console
+---
+ 
+A tour of classification algorithms to detect credit card fraud, primarily using the caret package.
+
+Data from <a href = https://www.kaggle.com/mlg-ulb/creditcardfraud/data>Kaggle</a>.
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(comment = NA, message = FALSE, warning = FALSE)
+options(digits = 6)
+# setwd('R/Credit_Fraud-Kaggle/Scripts')
+```
+
+
+## 1. Libraries {.tabset}
+
+### Libraries
+
+```{r}
+set.seed(123456)
+
+library(tidyverse)
+theme_set(theme_bw())
+library(keras)
+library(tensorflow)
+tf$set_random_seed(123456)
+library(caret)    # Note: needs to be loaded in after tensorflow
+library(gridExtra)
+library(DMwR)
+```
+
+
+### Session Info
+
+```{r}
+sessionInfo()
+```
+
+
+
+### Custom Functions
+```{r}
+# Chosen at random
+test.class <- function(model, test=credit_dev, cl=credit_dev$Class, positive = "1") {
+    # Given a model 'model', predicts the test classifier. Then returns a confusion matrix for the test data.
+    # Model = A model object (ex., glm, random forest, knn)
+    # test = data.frame containing all the variables used in the model
+    # cl = A factor of the true classifications for the variable of interest in 'test'
+    # positive = Which outcome is the outcome of interest? By default, it is 1.
+   predict <- predict(model, test)
+   return(confusionMatrix(predict, cl, positive = positive))
+}
+
+scaleFUN <- function(x) sprintf("%.2f", x)
+
+```
+
+## 2. Load in Data {.tabset}
+
+These data are all PCA variables (i.e., these are not the actual variables)
+```{r, include = FALSE}
+filepath <- "../Data/creditcard.csv"
+
+# Note: Data dims are (300,000, 30)
+credit <- read_csv(filepath)    # This file is not stored on git as it exceeds the file limit.
+credit$Class <- as.factor(credit$Class)
+```
+
+### Data structure and Descriptive Stats:
+
+```{r}
+glimpse(credit)
+```
+
+
+***
+
+### Missingness
+
+There is one missing entry for Time. It's a non-fraud entry and it's one of 200,000--I'm just going to remove it.
+```{r}
+colSums(is.na(credit))
+```
+
+```{r}
+credit <- na.omit(credit)
+```
+
+***
+
+## 3. Descriptive Stats
+
+These data are composed of anonymized variables that have been reduced by PCA. For that reason descriptive stats aren't as important to us as they would normally be, since we have absolutely no way of interpreting them.
+
+
+Most transactions are very small, but some are very large. Larger transactions *may* be more associated with fraud.
+
+```{r}
+summary(credit$Amount)
+```
+
+```{r}
+p1 <- ggplot(credit) +
+    aes(x = Amount) +
+    geom_histogram()
+
+p2 <- ggplot(credit) +
+    aes(x = Amount) +
+    stat_ecdf()
+
+grid.arrange(p1, p2, ncol = 2)
+```
+
+
+
+
+Time is described as *Number of seconds elapsed between each transaction (over two days)*. I'm not 100% clear on what this means, but judging from the bimodal pattern plotted below I would suspect that data collection began around midnight and continued for 48 hours.
+
+This is interesting because if fraud is more common at certain times of the day, we should really change this feature to 'represent time of day' rather than 'seconds since start'
+
+```{r}
+p1 <- ggplot(credit) +
+    aes(x = Time) +
+    geom_histogram() +
+    scale_x_continuous(minor_breaks = seq(0, 180000, 3600))
+
+p2 <- ggplot(credit) +
+    aes(x = Time) +
+    stat_ecdf()
+
+grid.arrange(p1, p2, ncol = 2)
+```
+
+***
+
+In fact, let's make a new feature now. There are a few ways to split this up--looking only at time of day, or assigning each time a score based on how many other transactions are happening around that time. E.g., breaking up transactions into 10 or 30 minute blocks and making a new variable that describes how many transactions took place in that period.
+
+For simplicity I will just use 'time of day', which atleast roughly increases as 'time of day' increases. 
+
+If fraud is actually associated with Time it will *probably* be non-monotonic (eg., more active at very early and very late time rather than trending up or down as 'time of day' increases). For that reason a non-linear classifier would probably do better if Time is important.
+
+
+```{r}
+credit <- credit %>%
+    mutate(time_of_day = ifelse(Time < 86400, Time / 3600, (Time - 86400) / 3600))
+
+ggplot(credit) +
+    aes(x = time_of_day) +
+    geom_histogram() +
+    scale_x_continuous(minor_breaks = seq(0, 180000, 3600))
+
+```
+
+
+***
+
+
+## 4. Data Partitioning
+
+1 is credit card fraud, 0 is a normal transaction.
+
+Only 0.2% (492) of the entries are actual fraud! We will need to take special approaches to handle these unbalanced data.
+
+```{r}
+summary(credit$Class)    
+```
+
+***
+
+We start by sampling data for each of the training, CV (development), and test sets. We will then undersample the non-fraud cases.
+
+caret's `createDataPartition` function works like `sample` in base R, except it makes sure that the response variable is balanced across the different data sets. This is especially important when the number of "events" is low.
+
+```{r}
+mask_train <- createDataPartition(credit$Class, p = 0.7, list = F)
+credit_train <- credit[mask_train, ]
+
+# Split the remaining 30% into CV and test sets. Unfortunately this is a convoluted process
+mask_cv <- createDataPartition(credit$Class[-mask_train], p = 0.5, list = F)
+credit_dev <- credit[mask_cv, ]
+credit_test <- credit[-mask_train, ][-mask_cv, ]
+
+```
+
+
+#### Controls for model validation
+
+Define the controls for each model fit. Here I'm using 5x5-fold CV.
+```{r}
+fit.controls <- trainControl(method = "repeatedcv",    # Bootstrapped CV
+                             number = 5,    # number of CV
+                             repeats = 5)    # number of repeats
+```
+
+
+## 5. Dealing with Unbalanced Classes:  {.tabset}
+
+I'm going to try and figure out which sampling methods are best for these data. For each sampling technique I will use some fairly generic random forests. If any sampling techniques seem to work better than others I will follow up on those specifically and try out other classifiers.
+
+*(Note: For faster Rmarkdown rendering I've disabled the evaluation of the code and am just copying the output from the console)*
+
+**Summary:** 
+
+* Oversampling, SMOTE, and even no sampling perform much better on the dev set compared to undersampling. 
+
+* Oversampling and No sampling produced the highest kappas in these random forest models. Unlike SMOTE and undersampling the training errors are somewhat reflective of the dev set errors, which make them more useful sampling techniques to train models on. 
+
+* Whereas undersampling, oversampling, and SMOTE tended to overfit the training data, no sampling performed better in the dev set compared to the training set. I'm not completely sure why this is the case. (a) I could be under-trained (this will be determined later); or (b) there may be overlap between positive and negative events in the training set that precludes very high training Kappa, whereas the dev set is more sparse (?).
+
+* Running the sampling *inside* of cross-validation might improve the agreement between the training metrics and dev metrics.
+
+I will move forward using oversampling, SMOTE, and no sampling and try some other classification models.
+
+
+
+### 5.1. Undersampling {.tabset}
+
+Undersampling involves censoring a large amount of data.
+
+
+
+```{r}
+## Note I am excluding 'Time' and 'Amount'
+
+credit_train_downsampled <- downSample(x = subset(credit_train, select = -Class),
+                               y = credit_train$Class)
+
+summary(credit_train_downsampled$Class)
+```
+
+```{r}
+model_automate_rf <- function(data_, 
+                              m_try = c(1, 2, 4, 8, 12, 16), 
+                              fit_controls = fit.controls){
+    kappas = data.frame(mtry = NA, set = NA, kappa = NA)
+    
+    for (mtry in m_try){
+        fit_rf <- train(Class ~ . -Time,
+                        data = data_,
+                        method = 'rf',
+                        trControl = fit_controls,
+                        tuneGrid = expand.grid(mtry = mtry),
+                        n.trees = 3001,
+                        metric = 'Kappa')
+        
+        fit_metrics = test.class(fit_rf)
+        kappas = rbind(kappas, c(mtry, 'train', fit_rf$results$Kappa))
+        kappas = rbind(kappas, c(mtry, 'dev', fit_metrics$overall['Kappa']))
+        print(paste('mtry: ', mtry))
+        print(fit_rf$results$Kappa)
+        print(fit_metrics)
+    }
+    
+    kappas = kappas %>%
+        na.omit() %>%
+        mutate(kappa = as.numeric(kappa),
+               mtry = as.numeric(mtry))
+    
+    p1 <- ggplot(kappas) +
+        aes(x = mtry, y = kappa, col = set) +
+        geom_point() +
+        geom_line() +
+        scale_y_continuous(labels = scaleFUN)
+    
+    return(p1)
+}
+```
+
+```{r, eval = FALSE}
+model_automate_rf(credit_train_downsampled)
+```
+
+
+![](../Outputs/undersample_rf_fit1.png)
+
+```
+1] "mtry:  1"
+[1] 0.876
+Confusion Matrix and Statistics
+
+          Reference
+Prediction     0     1
+         0 42043     4
+         1   584    90
+                                        
+               Accuracy : 0.986         
+                 95% CI : (0.985, 0.987)
+    No Information Rate : 0.998         
+    P-Value [Acc > NIR] : 1             
+                                        
+                  Kappa : 0.231         
+ Mcnemar's Test P-Value : <2e-16        
+                                        
+            Sensitivity : 0.95745       
+            Specificity : 0.98630       
+         Pos Pred Value : 0.13353       
+         Neg Pred Value : 0.99990       
+             Prevalence : 0.00220       
+         Detection Rate : 0.00211       
+   Detection Prevalence : 0.01578       
+      Balanced Accuracy : 0.97187       
+                                        
+       'Positive' Class : 1             
+                                        
+[1] "mtry:  2"
+[1] 0.88
+Confusion Matrix and Statistics
+
+          Reference
+Prediction     0     1
+         0 41978     3
+         1   649    91
+                                        
+               Accuracy : 0.985         
+                 95% CI : (0.984, 0.986)
+    No Information Rate : 0.998         
+    P-Value [Acc > NIR] : 1             
+                                        
+                  Kappa : 0.215         
+ Mcnemar's Test P-Value : <2e-16        
+                                        
+            Sensitivity : 0.96809       
+            Specificity : 0.98477       
+         Pos Pred Value : 0.12297       
+         Neg Pred Value : 0.99993       
+             Prevalence : 0.00220       
+         Detection Rate : 0.00213       
+   Detection Prevalence : 0.01732       
+      Balanced Accuracy : 0.97643       
+                                        
+       'Positive' Class : 1             
+                                        
+[1] "mtry:  4"
+[1] 0.891
+Confusion Matrix and Statistics
+
+          Reference
+Prediction     0     1
+         0 41838     2
+         1   789    92
+                                       
+               Accuracy : 0.981        
+                 95% CI : (0.98, 0.983)
+    No Information Rate : 0.998        
+    P-Value [Acc > NIR] : 1            
+                                       
+                  Kappa : 0.185        
+ Mcnemar's Test P-Value : <2e-16       
+                                       
+            Sensitivity : 0.97872      
+            Specificity : 0.98149      
+         Pos Pred Value : 0.10443      
+         Neg Pred Value : 0.99995      
+             Prevalence : 0.00220      
+         Detection Rate : 0.00215      
+   Detection Prevalence : 0.02062      
+      Balanced Accuracy : 0.98011      
+                                       
+       'Positive' Class : 1            
+                                       
+[1] "mtry:  8"
+[1] 0.89
+Confusion Matrix and Statistics
+
+          Reference
+Prediction     0     1
+         0 41674     2
+         1   953    92
+                                        
+               Accuracy : 0.978         
+                 95% CI : (0.976, 0.979)
+    No Information Rate : 0.998         
+    P-Value [Acc > NIR] : 1             
+                                        
+                  Kappa : 0.158         
+ Mcnemar's Test P-Value : <2e-16        
+                                        
+            Sensitivity : 0.97872       
+            Specificity : 0.97764       
+         Pos Pred Value : 0.08804       
+         Neg Pred Value : 0.99995       
+             Prevalence : 0.00220       
+         Detection Rate : 0.00215       
+   Detection Prevalence : 0.02446       
+      Balanced Accuracy : 0.97818       
+                                        
+       'Positive' Class : 1             
+                                        
+[1] "mtry:  12"
+[1] 0.888
+Confusion Matrix and Statistics
+
+          Reference
+Prediction     0     1
+         0 41554     2
+         1  1073    92
+                                        
+               Accuracy : 0.975         
+                 95% CI : (0.973, 0.976)
+    No Information Rate : 0.998         
+    P-Value [Acc > NIR] : 1             
+                                        
+                  Kappa : 0.143         
+ Mcnemar's Test P-Value : <2e-16        
+                                        
+            Sensitivity : 0.97872       
+            Specificity : 0.97483       
+         Pos Pred Value : 0.07897       
+         Neg Pred Value : 0.99995       
+             Prevalence : 0.00220       
+         Detection Rate : 0.00215       
+   Detection Prevalence : 0.02727       
+      Balanced Accuracy : 0.97678       
+                                        
+       'Positive' Class : 1             
+                                        
+[1] "mtry:  16"
+[1] 0.885
+Confusion Matrix and Statistics
+
+          Reference
+Prediction     0     1
+         0 41470     2
+         1  1157    92
+                                        
+               Accuracy : 0.973         
+                 95% CI : (0.971, 0.974)
+    No Information Rate : 0.998         
+    P-Value [Acc > NIR] : 1             
+                                        
+                  Kappa : 0.133         
+ Mcnemar's Test P-Value : <2e-16        
+                                        
+            Sensitivity : 0.97872       
+            Specificity : 0.97286       
+         Pos Pred Value : 0.07366       
+         Neg Pred Value : 0.99995       
+             Prevalence : 0.00220       
+         Detection Rate : 0.00215       
+   Detection Prevalence : 0.02924       
+      Balanced Accuracy : 0.97579       
+                                        
+       'Positive' Class : 1        
+```
+
+
+The accuracy is very high, but that is to be expected when the classes are so imbalanced. Since only 0.2% of the observations are positive events, an accuracy of 99.8% is the No Information Rate.
+
+A useful statistic is Kappa, since it takes into account the marginal distribution of the response variable, or the positive predictive value (precision) vs. recall (sensitivity).
+
+Using these metrics, undersampling produces *reasonable* (but not amazing) results.
+
+***
+
+### 5.2. Oversampling
+
+Undersampling may not work so well when we don't have a lot of positive events, since it throws away much data. Still, I don't want to have a huge amount of duplicated data, so I'm going to partially down-sample first.
+
+
+```{r}
+temp <- credit_train %>%
+    filter(Class == 0) %>%
+    sample_n(10000)
+
+temp2 <- credit_train %>%
+    filter(Class == 1)
+
+credit_10000 <- rbind(temp, temp2)
+
+credit_train_oversampled <- upSample(x = subset(credit_10000, select = -Class),
+                                     y = credit_10000$Class)
+
+summary(credit_train_oversampled$Class)
+```
+
+```{r, eval = FALSE}
+model_automate_rf(credit_train_oversampled)
+```
+
+![](../Outputs/oversample_rf_fit1.png)
+
+```
+[1] "mtry:  1"
+[1] 1
+Confusion Matrix and Statistics
+
+          Reference
+Prediction     0     1
+         0 42605     6
+         1    22    88
+                                    
+               Accuracy : 0.999     
+                 95% CI : (0.999, 1)
+    No Information Rate : 0.998     
+    P-Value [Acc > NIR] : 1.17e-15  
+                                    
+                  Kappa : 0.862     
+ Mcnemar's Test P-Value : 0.00459   
+                                    
+            Sensitivity : 0.93617   
+            Specificity : 0.99948   
+         Pos Pred Value : 0.80000   
+         Neg Pred Value : 0.99986   
+             Prevalence : 0.00220   
+         Detection Rate : 0.00206   
+   Detection Prevalence : 0.00257   
+      Balanced Accuracy : 0.96783   
+                                    
+       'Positive' Class : 1         
+                                    
+[1] "mtry:  2"
+[1] 0.999
+Confusion Matrix and Statistics
+
+          Reference
+Prediction     0     1
+         0 42602     5
+         1    25    89
+                                    
+               Accuracy : 0.999     
+                 95% CI : (0.999, 1)
+    No Information Rate : 0.998     
+    P-Value [Acc > NIR] : 1.23e-14  
+                                    
+                  Kappa : 0.855     
+ Mcnemar's Test P-Value : 0.000523  
+                                    
+            Sensitivity : 0.94681   
+            Specificity : 0.99941   
+         Pos Pred Value : 0.78070   
+         Neg Pred Value : 0.99988   
+             Prevalence : 0.00220   
+         Detection Rate : 0.00208   
+   Detection Prevalence : 0.00267   
+      Balanced Accuracy : 0.97311   
+                                    
+       'Positive' Class : 1         
+                                    
+[1] "mtry:  4"
+[1] 0.999
+Confusion Matrix and Statistics
+
+          Reference
+Prediction     0     1
+         0 42601     5
+         1    26    89
+                                    
+               Accuracy : 0.999     
+                 95% CI : (0.999, 1)
+    No Information Rate : 0.998     
+    P-Value [Acc > NIR] : 3.79e-14  
+                                    
+                  Kappa : 0.851     
+ Mcnemar's Test P-Value : 0.000328  
+                                    
+            Sensitivity : 0.94681   
+            Specificity : 0.99939   
+         Pos Pred Value : 0.77391   
+         Neg Pred Value : 0.99988   
+             Prevalence : 0.00220   
+         Detection Rate : 0.00208   
+   Detection Prevalence : 0.00269   
+      Balanced Accuracy : 0.97310   
+                                    
+       'Positive' Class : 1         
+                                    
+[1] "mtry:  8"
+[1] 0.999
+Confusion Matrix and Statistics
+
+          Reference
+Prediction     0     1
+         0 42602     5
+         1    25    89
+                                    
+               Accuracy : 0.999     
+                 95% CI : (0.999, 1)
+    No Information Rate : 0.998     
+    P-Value [Acc > NIR] : 1.23e-14  
+                                    
+                  Kappa : 0.855     
+ Mcnemar's Test P-Value : 0.000523  
+                                    
+            Sensitivity : 0.94681   
+            Specificity : 0.99941   
+         Pos Pred Value : 0.78070   
+         Neg Pred Value : 0.99988   
+             Prevalence : 0.00220   
+         Detection Rate : 0.00208   
+   Detection Prevalence : 0.00267   
+      Balanced Accuracy : 0.97311   
+                                    
+       'Positive' Class : 1         
+                                    
+[1] "mtry:  12"
+[1] 0.999
+Confusion Matrix and Statistics
+
+          Reference
+Prediction     0     1
+         0 42602     5
+         1    25    89
+                                    
+               Accuracy : 0.999     
+                 95% CI : (0.999, 1)
+    No Information Rate : 0.998     
+    P-Value [Acc > NIR] : 1.23e-14  
+                                    
+                  Kappa : 0.855     
+ Mcnemar's Test P-Value : 0.000523  
+                                    
+            Sensitivity : 0.94681   
+            Specificity : 0.99941   
+         Pos Pred Value : 0.78070   
+         Neg Pred Value : 0.99988   
+             Prevalence : 0.00220   
+         Detection Rate : 0.00208   
+   Detection Prevalence : 0.00267   
+      Balanced Accuracy : 0.97311   
+                                    
+       'Positive' Class : 1         
+                                    
+[1] "mtry:  16"
+[1] 0.999
+Confusion Matrix and Statistics
+
+          Reference
+Prediction     0     1
+         0 42601     5
+         1    26    89
+                                    
+               Accuracy : 0.999     
+                 95% CI : (0.999, 1)
+    No Information Rate : 0.998     
+    P-Value [Acc > NIR] : 3.79e-14  
+                                    
+                  Kappa : 0.851     
+ Mcnemar's Test P-Value : 0.000328  
+                                    
+            Sensitivity : 0.94681   
+            Specificity : 0.99939   
+         Pos Pred Value : 0.77391   
+         Neg Pred Value : 0.99988   
+             Prevalence : 0.00220   
+         Detection Rate : 0.00208   
+   Detection Prevalence : 0.00269   
+      Balanced Accuracy : 0.97310   
+                                    
+       'Positive' Class : 1         
+```
+
+***
+
+### 5.3 SMOTE
+
+Synthetic minority over-sampling technique is a hybrid method that undersamples the majority class and oversamples the minority class. Rather than being exact replicates, the minority observations are imputed by interpolating values from other minority class observations (using k nearest neighbours).
+
+
+```{r}
+# Note: SMOTE only takes Dataframes (Does not accept tbls)
+# The default sampling is 200% over and 200% under, and k = 5
+credit_train_smote <- DMwR::SMOTE(Class ~ . - Time, 
+                                  data = as.data.frame(credit_train))
+summary(credit_train_smote$Class)
+```
+
+
+```{r, eval = FALSE}
+model_automate_rf(credit_train_smote)
+```
+
+***
+
+SMOTE appears to have some potential. The performance when `mtry = 1` is decent. It is definitely overfiting the training data.
+
+
+![](../Outputs/smote_fit_rf1.png)
+
+
+
+```
+[1] "mtry:  1"
+[1] 0.937
+Confusion Matrix and Statistics
+
+          Reference
+Prediction     0     1
+         0 42460     5
+         1   167    89
+                                        
+               Accuracy : 0.996         
+                 95% CI : (0.995, 0.997)
+    No Information Rate : 0.998         
+    P-Value [Acc > NIR] : 1             
+                                        
+                  Kappa : 0.507         
+ Mcnemar's Test P-Value : <2e-16        
+                                        
+            Sensitivity : 0.94681       
+            Specificity : 0.99608       
+         Pos Pred Value : 0.34766       
+         Neg Pred Value : 0.99988       
+             Prevalence : 0.00220       
+         Detection Rate : 0.00208       
+   Detection Prevalence : 0.00599       
+      Balanced Accuracy : 0.97145       
+                                        
+       'Positive' Class : 1             
+                                        
+[1] "mtry:  2"
+[1] 0.94
+Confusion Matrix and Statistics
+
+          Reference
+Prediction     0     1
+         0 42396     5
+         1   231    89
+                                        
+               Accuracy : 0.994         
+                 95% CI : (0.994, 0.995)
+    No Information Rate : 0.998         
+    P-Value [Acc > NIR] : 1             
+                                        
+                  Kappa : 0.428         
+ Mcnemar's Test P-Value : <2e-16        
+                                        
+            Sensitivity : 0.94681       
+            Specificity : 0.99458       
+         Pos Pred Value : 0.27812       
+         Neg Pred Value : 0.99988       
+             Prevalence : 0.00220       
+         Detection Rate : 0.00208       
+   Detection Prevalence : 0.00749       
+      Balanced Accuracy : 0.97069       
+                                        
+       'Positive' Class : 1             
+                                        
+[1] "mtry:  4"
+[1] 0.944
+Confusion Matrix and Statistics
+
+          Reference
+Prediction     0     1
+         0 42271     5
+         1   356    89
+                                        
+               Accuracy : 0.992         
+                 95% CI : (0.991, 0.992)
+    No Information Rate : 0.998         
+    P-Value [Acc > NIR] : 1             
+                                        
+                  Kappa : 0.328         
+ Mcnemar's Test P-Value : <2e-16        
+                                        
+            Sensitivity : 0.94681       
+            Specificity : 0.99165       
+         Pos Pred Value : 0.20000       
+         Neg Pred Value : 0.99988       
+             Prevalence : 0.00220       
+         Detection Rate : 0.00208       
+   Detection Prevalence : 0.01042       
+      Balanced Accuracy : 0.96923       
+                                        
+       'Positive' Class : 1             
+                                        
+[1] "mtry:  8"
+[1] 0.945
+Confusion Matrix and Statistics
+
+          Reference
+Prediction     0     1
+         0 42170     5
+         1   457    89
+                                       
+               Accuracy : 0.989        
+                 95% CI : (0.988, 0.99)
+    No Information Rate : 0.998        
+    P-Value [Acc > NIR] : 1            
+                                       
+                  Kappa : 0.275        
+ Mcnemar's Test P-Value : <2e-16       
+                                       
+            Sensitivity : 0.94681      
+            Specificity : 0.98928      
+         Pos Pred Value : 0.16300      
+         Neg Pred Value : 0.99988      
+             Prevalence : 0.00220      
+         Detection Rate : 0.00208      
+   Detection Prevalence : 0.01278      
+      Balanced Accuracy : 0.96804      
+                                       
+       'Positive' Class : 1            
+                                       
+[1] "mtry:  12"
+[1] 0.947
+Confusion Matrix and Statistics
+
+          Reference
+Prediction     0     1
+         0 42085     4
+         1   542    90
+                                        
+               Accuracy : 0.987         
+                 95% CI : (0.986, 0.988)
+    No Information Rate : 0.998         
+    P-Value [Acc > NIR] : 1             
+                                        
+                  Kappa : 0.245         
+ Mcnemar's Test P-Value : <2e-16        
+                                        
+            Sensitivity : 0.95745       
+            Specificity : 0.98729       
+         Pos Pred Value : 0.14241       
+         Neg Pred Value : 0.99990       
+             Prevalence : 0.00220       
+         Detection Rate : 0.00211       
+   Detection Prevalence : 0.01479       
+      Balanced Accuracy : 0.97237       
+                                        
+       'Positive' Class : 1             
+                                        
+[1] "mtry:  16"
+[1] 0.946
+Confusion Matrix and Statistics
+
+          Reference
+Prediction     0     1
+         0 42047     2
+         1   580    92
+                                        
+               Accuracy : 0.986         
+                 95% CI : (0.985, 0.987)
+    No Information Rate : 0.998         
+    P-Value [Acc > NIR] : 1             
+                                        
+                  Kappa : 0.237         
+ Mcnemar's Test P-Value : <2e-16        
+                                        
+            Sensitivity : 0.97872       
+            Specificity : 0.98639       
+         Pos Pred Value : 0.13690       
+         Neg Pred Value : 0.99995       
+             Prevalence : 0.00220       
+         Detection Rate : 0.00215       
+   Detection Prevalence : 0.01573       
+      Balanced Accuracy : 0.98256       
+                                        
+       'Positive' Class : 1     
+```
+
+
+***
+
+### 5.4 SMOTE v 2
+
+I think the main reason why SMOTE is performing poorly compared to straight-up oversampling is the number of training observations. I'm going to try anoher random forest with SMOTE, but create a lot more minority cases.
+
+
+```{r}
+# Choose parameters that give roughly the same number and ~ 20,000 observations
+credit_train_smote2 <- DMwR::SMOTE(Class ~ . - Time, 
+                                  data = as.data.frame(credit_train),
+                                  perc.over = 2700,
+                                  perc.under = 110) # Does not accept tbls
+summary(credit_train_smote2$Class)
+```
+
+```{r, eval = FALSE}
+model_automate_rf(credit_train_smote2)
+```
+
+
+![](../Outputs/smote_fit_rf2.png)
+
+```
+[1] "mtry:  1"
+[1] 0.989
+Confusion Matrix and Statistics
+
+          Reference
+Prediction     0     1
+         0 42589     5
+         1    38    89
+                                        
+               Accuracy : 0.999         
+                 95% CI : (0.999, 0.999)
+    No Information Rate : 0.998         
+    P-Value [Acc > NIR] : 3.06e-09      
+                                        
+                  Kappa : 0.805         
+ Mcnemar's Test P-Value : 1.06e-06      
+                                        
+            Sensitivity : 0.94681       
+            Specificity : 0.99911       
+         Pos Pred Value : 0.70079       
+         Neg Pred Value : 0.99988       
+             Prevalence : 0.00220       
+         Detection Rate : 0.00208       
+   Detection Prevalence : 0.00297       
+      Balanced Accuracy : 0.97296       
+                                        
+       'Positive' Class : 1             
+                                        
+[1] "mtry:  2"
+[1] 0.991
+Confusion Matrix and Statistics
+
+          Reference
+Prediction     0     1
+         0 42587     5
+         1    40    89
+                                        
+               Accuracy : 0.999         
+                 95% CI : (0.999, 0.999)
+    No Information Rate : 0.998         
+    P-Value [Acc > NIR] : 1.42e-08      
+                                        
+                  Kappa : 0.798         
+ Mcnemar's Test P-Value : 4.01e-07      
+                                        
+            Sensitivity : 0.94681       
+            Specificity : 0.99906       
+         Pos Pred Value : 0.68992       
+         Neg Pred Value : 0.99988       
+             Prevalence : 0.00220       
+         Detection Rate : 0.00208       
+   Detection Prevalence : 0.00302       
+      Balanced Accuracy : 0.97294       
+                                        
+       'Positive' Class : 1             
+                                        
+[1] "mtry:  4"
+[1] 0.991
+Confusion Matrix and Statistics
+
+          Reference
+Prediction     0     1
+         0 42579     5
+         1    48    89
+                                        
+               Accuracy : 0.999         
+                 95% CI : (0.998, 0.999)
+    No Information Rate : 0.998         
+    P-Value [Acc > NIR] : 2.89e-06      
+                                        
+                  Kappa : 0.77          
+ Mcnemar's Test P-Value : 7.97e-09      
+                                        
+            Sensitivity : 0.94681       
+            Specificity : 0.99887       
+         Pos Pred Value : 0.64964       
+         Neg Pred Value : 0.99988       
+             Prevalence : 0.00220       
+         Detection Rate : 0.00208       
+   Detection Prevalence : 0.00321       
+      Balanced Accuracy : 0.97284       
+                                        
+       'Positive' Class : 1             
+                                        
+[1] "mtry:  8"
+[1] 0.99
+Confusion Matrix and Statistics
+
+          Reference
+Prediction     0     1
+         0 42565     5
+         1    62    89
+                                        
+               Accuracy : 0.998         
+                 95% CI : (0.998, 0.999)
+    No Information Rate : 0.998         
+    P-Value [Acc > NIR] : 0.00209       
+                                        
+                  Kappa : 0.726         
+ Mcnemar's Test P-Value : 7.84e-12      
+                                        
+            Sensitivity : 0.94681       
+            Specificity : 0.99855       
+         Pos Pred Value : 0.58940       
+         Neg Pred Value : 0.99988       
+             Prevalence : 0.00220       
+         Detection Rate : 0.00208       
+   Detection Prevalence : 0.00353       
+      Balanced Accuracy : 0.97268       
+                                        
+       'Positive' Class : 1             
+                                        
+[1] "mtry:  12"
+[1] 0.99
+Confusion Matrix and Statistics
+
+          Reference
+Prediction     0     1
+         0 42546     5
+         1    81    89
+                                        
+               Accuracy : 0.998         
+                 95% CI : (0.998, 0.998)
+    No Information Rate : 0.998         
+    P-Value [Acc > NIR] : 0.221         
+                                        
+                  Kappa : 0.673         
+ Mcnemar's Test P-Value : 6.09e-16      
+                                        
+            Sensitivity : 0.94681       
+            Specificity : 0.99810       
+         Pos Pred Value : 0.52353       
+         Neg Pred Value : 0.99988       
+             Prevalence : 0.00220       
+         Detection Rate : 0.00208       
+   Detection Prevalence : 0.00398       
+      Balanced Accuracy : 0.97245       
+                                        
+       'Positive' Class : 1             
+                                        
+[1] "mtry:  16"
+[1] 0.989
+Confusion Matrix and Statistics
+
+          Reference
+Prediction     0     1
+         0 42535     5
+         1    92    89
+                                        
+               Accuracy : 0.998         
+                 95% CI : (0.997, 0.998)
+    No Information Rate : 0.998         
+    P-Value [Acc > NIR] : 0.647         
+                                        
+                  Kappa : 0.646         
+ Mcnemar's Test P-Value : <2e-16        
+                                        
+            Sensitivity : 0.94681       
+            Specificity : 0.99784       
+         Pos Pred Value : 0.49171       
+         Neg Pred Value : 0.99988       
+             Prevalence : 0.00220       
+         Detection Rate : 0.00208       
+   Detection Prevalence : 0.00424       
+      Balanced Accuracy : 0.97233       
+                                        
+       'Positive' Class : 1             
+                                        
+```
+
+
+### 5.5 No Sampling
+
+I wasn't going to run this initially because sampling methods are supposed to help improve training performance. However, I have noticed that models performing better on the training data tend to perform worse on the dev set. 
+
+Perhaps they have been overfitted, but it is also possible that the large disparity in prevalence of fraud between the training set and dev set make it hard to pick the best training model in advance. 
+
+Even though I'm calling this 'no sampling' I'm still going to only use a subset of the data for the sake of computation time.
+
+```{r}
+credit_train_nosample <- sample_n(credit_train, 20000)
+
+summary(credit_train_nosample$Class)
+```
+
+```{r, eval = FALSE}
+model_automate_rf(credit_train_nosample)
+```
+
+![](../Outputs/no_sample_fit_rf1.png)
+
+```
+[1] "mtry:  1"
+Confusion Matrix and Statistics
+
+          Reference
+Prediction     0     1
+         0 42626    44
+         1     1    50
+                                        
+               Accuracy : 0.999         
+                 95% CI : (0.999, 0.999)
+    No Information Rate : 0.998         
+    P-Value [Acc > NIR] : 1.42e-08      
+                                        
+                  Kappa : 0.689         
+ Mcnemar's Test P-Value : 3.83e-10      
+                                        
+            Sensitivity : 0.53191       
+            Specificity : 0.99998       
+         Pos Pred Value : 0.98039       
+         Neg Pred Value : 0.99897       
+             Prevalence : 0.00220       
+         Detection Rate : 0.00117       
+   Detection Prevalence : 0.00119       
+      Balanced Accuracy : 0.76595       
+                                        
+       'Positive' Class : 1             
+                                        
+[1] "mtry:  2"
+Confusion Matrix and Statistics
+
+          Reference
+Prediction     0     1
+         0 42625    32
+         1     2    62
+                                        
+               Accuracy : 0.999         
+                 95% CI : (0.999, 0.999)
+    No Information Rate : 0.998         
+    P-Value [Acc > NIR] : 9.23e-13      
+                                        
+                  Kappa : 0.784         
+ Mcnemar's Test P-Value : 6.58e-07      
+                                        
+            Sensitivity : 0.65957       
+            Specificity : 0.99995       
+         Pos Pred Value : 0.96875       
+         Neg Pred Value : 0.99925       
+             Prevalence : 0.00220       
+         Detection Rate : 0.00145       
+   Detection Prevalence : 0.00150       
+      Balanced Accuracy : 0.82976       
+                                        
+       'Positive' Class : 1             
+                                        
+[1] "mtry:  4"
+Confusion Matrix and Statistics
+
+          Reference
+Prediction     0     1
+         0 42625    26
+         1     2    68
+                                    
+               Accuracy : 0.999     
+                 95% CI : (0.999, 1)
+    No Information Rate : 0.998     
+    P-Value [Acc > NIR] : 1.17e-15  
+                                    
+                  Kappa : 0.829     
+ Mcnemar's Test P-Value : 1.38e-05  
+                                    
+            Sensitivity : 0.72340   
+            Specificity : 0.99995   
+         Pos Pred Value : 0.97143   
+         Neg Pred Value : 0.99939   
+             Prevalence : 0.00220   
+         Detection Rate : 0.00159   
+   Detection Prevalence : 0.00164   
+      Balanced Accuracy : 0.86168   
+                                    
+       'Positive' Class : 1         
+                                    
+[1] "mtry:  8"
+Confusion Matrix and Statistics
+
+          Reference
+Prediction     0     1
+         0 42625    22
+         1     2    72
+                                    
+               Accuracy : 0.999     
+                 95% CI : (0.999, 1)
+    No Information Rate : 0.998     
+    P-Value [Acc > NIR] : < 2e-16   
+                                    
+                  Kappa : 0.857     
+ Mcnemar's Test P-Value : 0.000105  
+                                    
+            Sensitivity : 0.76596   
+            Specificity : 0.99995   
+         Pos Pred Value : 0.97297   
+         Neg Pred Value : 0.99948   
+             Prevalence : 0.00220   
+         Detection Rate : 0.00169   
+   Detection Prevalence : 0.00173   
+      Balanced Accuracy : 0.88296   
+                                    
+       'Positive' Class : 1         
+                                    
+[1] "mtry:  12"
+Confusion Matrix and Statistics
+
+          Reference
+Prediction     0     1
+         0 42626    23
+         1     1    71
+                                    
+               Accuracy : 0.999     
+                 95% CI : (0.999, 1)
+    No Information Rate : 0.998     
+    P-Value [Acc > NIR] : < 2e-16   
+                                    
+                  Kappa : 0.855     
+ Mcnemar's Test P-Value : 1.81e-05  
+                                    
+            Sensitivity : 0.75532   
+            Specificity : 0.99998   
+         Pos Pred Value : 0.98611   
+         Neg Pred Value : 0.99946   
+             Prevalence : 0.00220   
+         Detection Rate : 0.00166   
+   Detection Prevalence : 0.00169   
+      Balanced Accuracy : 0.87765   
+                                    
+       'Positive' Class : 1         
+                                    
+[1] "mtry:  16"
+Confusion Matrix and Statistics
+
+          Reference
+Prediction     0     1
+         0 42623    23
+         1     4    71
+                                    
+               Accuracy : 0.999     
+                 95% CI : (0.999, 1)
+    No Information Rate : 0.998     
+    P-Value [Acc > NIR] : 3.43e-16  
+                                    
+                  Kappa : 0.84      
+ Mcnemar's Test P-Value : 0.000532  
+                                    
+            Sensitivity : 0.75532   
+            Specificity : 0.99991   
+         Pos Pred Value : 0.94667   
+         Neg Pred Value : 0.99946   
+             Prevalence : 0.00220   
+         Detection Rate : 0.00166   
+   Detection Prevalence : 0.00176   
+      Balanced Accuracy : 0.87761   
+                                    
+       'Positive' Class : 1    
+```
+
+
+
+***
+
+## 6. Classification {.tabset}
+
+In this section I will do some parameter searches across a number of classification models using either Oversampled or SMOTE-sampled data. I'll check the performance against the dev set and select a few candidate models.
+
+In a later section I'll manually play with each of the most promising models and try to eek out additional performance before finally testing 1-3 models on the test set to get an unbiased estimate of error.
+
+
+### 6.1 Over Sampling {.tabset}
+
+Recall that my 'no sampling' dataset still involves a subset of the original data set---it just doesn't attempt to adjust the ratio of positive-to-negative events.
+
+#### 6.1.1 Logistic Regression
+
+Logistic regression using all of the features has very poor PPV / Kappa.
+```{r, results = 'hide', warnings = 'hide'}
+fit_logistic <- train(Class ~ . - Time,
+                      data = credit_train_oversampled,
+                      method = 'glm',
+                      family = 'binomial',
+                      trControl = fit.controls,
+                      metric = 'Kappa')
+```
+
+Note this warning messsage:
+```
+Warning messages:
+1: glm.fit: algorithm did not converge
+2: glm.fit: fitted probabilities numerically 0 or 1 occurred
+```
+
+```{r}
+print(fit_logistic$results)
+```
+
+```{r}
+test.class(fit_logistic)
+```
+
+```{r, eval = FALSE}
+plot(varImp(fit_logistic))
+```
+
+
+#### 6.1.2 Penalized Logistic Regression
+
+Unpenalized regression is overfitting the data (except it is optimizing overall accuracy rather than Kappa). It's also running into issues where some variables offer complete separation of the groups (hence the warnings).
+
+I'm going to try penalized logistic regression (L2 norm) as a potential solution. 
+
+**Summary**
+
+Overall performance is fairly poor. Higher penalties give better PPV, but sensitivity suffers. Very high lambdas result in models that are undertrained; low lambdas result in models that are overfit.
+
+My guess is that the problem is too complex for a logistic regression. Even the models that are overfit have relatively poor training error.
+
+```{r, eval = FALSE}
+kappas <- data.frame(lambda = NA, set = NA, kappa = NA)
+
+for (lambda in c(1, 100, 1000, 10000, 100000)){
+    grid_plr <- expand.grid(lambda = lambda, cp = 'bic')
+    
+    fit_logistic <- train(Class ~ . - Time,
+                          data = credit_train_oversampled,
+                          method = 'plr',
+                          trControl = fit.controls,
+                          tuneGrid = grid_plr,
+                          metric = 'Kappa')
+    
+    fit_metrics <- test.class(fit_logistic)
+    kappas <- rbind(kappas, c(lambda, 'train', fit_logistic$results$Kappa))
+    kappas <- rbind(kappas, c(lambda, 'dev', fit_metrics$overall['Kappa']))
+    print(paste('lambda: ', lambda))
+    print(fit_logistic$results$Kappa)
+    print(fit_metrics)
+}
+
+kappas = kappas %>%
+    na.omit() %>%
+    mutate(kappa = as.numeric(kappa),
+           lambda = as.numeric(lambda))
+
+p1 <- ggplot(kappas) +
+    aes(x = lambda, y = kappa, col = set) +
+    geom_point() +
+    geom_line() +
+    scale_x_log10() +
+    scale_y_continuous(labels = scaleFUN)
+
+p1
+```
+
+![](../Outputs/fit_oversample_plr1.png)
+
+```
+[1] "lambda:  1"
+[1] 0.90444
+Confusion Matrix and Statistics
+
+          Reference
+Prediction     0     1
+         0 41889     9
+         1   738    85
+                                        
+               Accuracy : 0.983         
+                 95% CI : (0.981, 0.984)
+    No Information Rate : 0.998         
+    P-Value [Acc > NIR] : 1             
+                                        
+                  Kappa : 0.182         
+ Mcnemar's Test P-Value : <2e-16        
+                                        
+            Sensitivity : 0.90426       
+            Specificity : 0.98269       
+         Pos Pred Value : 0.10328       
+         Neg Pred Value : 0.99979       
+             Prevalence : 0.00220       
+         Detection Rate : 0.00199       
+   Detection Prevalence : 0.01926       
+      Balanced Accuracy : 0.94347       
+                                        
+       'Positive' Class : 1             
+                                        
+[1] "lambda:  100"
+[1] 0.89752
+Confusion Matrix and Statistics
+
+          Reference
+Prediction     0     1
+         0 41957    11
+         1   670    83
+                                        
+               Accuracy : 0.984         
+                 95% CI : (0.983, 0.985)
+    No Information Rate : 0.998         
+    P-Value [Acc > NIR] : 1             
+                                        
+                  Kappa : 0.193         
+ Mcnemar's Test P-Value : <2e-16        
+                                        
+            Sensitivity : 0.88298       
+            Specificity : 0.98428       
+         Pos Pred Value : 0.11023       
+         Neg Pred Value : 0.99974       
+             Prevalence : 0.00220       
+         Detection Rate : 0.00194       
+   Detection Prevalence : 0.01763       
+      Balanced Accuracy : 0.93363       
+                                        
+       'Positive' Class : 1             
+                                        
+[1] "lambda:  1000"
+[1] 0.88012
+Confusion Matrix and Statistics
+
+          Reference
+Prediction     0     1
+         0 41999    13
+         1   628    81
+                                        
+               Accuracy : 0.985         
+                 95% CI : (0.984, 0.986)
+    No Information Rate : 0.998         
+    P-Value [Acc > NIR] : 1             
+                                        
+                  Kappa : 0.199         
+ Mcnemar's Test P-Value : <2e-16        
+                                        
+            Sensitivity : 0.8617        
+            Specificity : 0.9853        
+         Pos Pred Value : 0.1142        
+         Neg Pred Value : 0.9997        
+             Prevalence : 0.0022        
+         Detection Rate : 0.0019        
+   Detection Prevalence : 0.0166        
+      Balanced Accuracy : 0.9235        
+                                        
+       'Positive' Class : 1             
+                                        
+[1] "lambda:  10000"
+[1] 0.84256
+Confusion Matrix and Statistics
+
+          Reference
+Prediction     0     1
+         0 42364    15
+         1   263    79
+                                        
+               Accuracy : 0.993         
+                 95% CI : (0.993, 0.994)
+    No Information Rate : 0.998         
+    P-Value [Acc > NIR] : 1             
+                                        
+                  Kappa : 0.36          
+ Mcnemar's Test P-Value : <2e-16        
+                                        
+            Sensitivity : 0.84043       
+            Specificity : 0.99383       
+         Pos Pred Value : 0.23099       
+         Neg Pred Value : 0.99965       
+             Prevalence : 0.00220       
+         Detection Rate : 0.00185       
+   Detection Prevalence : 0.00801       
+      Balanced Accuracy : 0.91713       
+                                        
+       'Positive' Class : 1             
+                                        
+[1] "lambda:  1e+05"
+[1] 0.79616
+Confusion Matrix and Statistics
+
+          Reference
+Prediction     0     1
+         0 42119    17
+         1   508    77
+                                        
+               Accuracy : 0.988         
+                 95% CI : (0.987, 0.989)
+    No Information Rate : 0.998         
+    P-Value [Acc > NIR] : 1             
+                                        
+                  Kappa : 0.224         
+ Mcnemar's Test P-Value : <2e-16        
+                                        
+            Sensitivity : 0.8191        
+            Specificity : 0.9881        
+         Pos Pred Value : 0.1316        
+         Neg Pred Value : 0.9996        
+             Prevalence : 0.0022        
+         Detection Rate : 0.0018        
+   Detection Prevalence : 0.0137        
+      Balanced Accuracy : 0.9036        
+                                        
+       'Positive' Class : 1            
+```
+
+#### 6.1.3 Neural Network {.tabset}
+
+Prepare data in the proper format for a neural net:
+
+```{r}
+
+# Scale the training data
+credit_train_oversampled_scaled <- credit_train_oversampled %>%
+    mutate(Amount = (Amount - mean(Amount)) / sd(Amount),
+           time_of_day = (time_of_day - mean(time_of_day)) / sd(time_of_day))
+
+# Convert to matrix
+x_train <- as.matrix(subset(credit_train_oversampled_scaled, select = -c(Class, Time)))
+y_train <- as.integer(credit_train_oversampled_scaled$Class) - 1    # Scales numerics back to 0/1
+
+
+# Scale the dev set (using scaling parameters from the training set)
+credit_dev_scaled <- credit_dev %>%
+    mutate(
+        Amount = (Amount - mean(credit_train_oversampled$Amount)) /
+            sd(credit_train_oversampled$Amount),
+        time_of_day = (time_of_day - mean(credit_train_oversampled$time_of_day)) /
+            sd(credit_train_oversampled$time_of_day))
+        
+# Convert to matrix
+x_dev <- as.matrix(subset(credit_dev_scaled, select = -c(Class, Time)))
+y_dev <- as.integer(credit_dev_scaled$Class) - 1    # Scales numerics back to 0/1
+
+```
+
+##### 6.1.3.1 16x8x1, 30 epochs
+
+The model appears to still be learning. 30 epochs is not enough, or the learning rate is too low.
+
+```{r}
+model <- keras_model_sequential()
+
+model %>% 
+    layer_dense(units = 16, activation = 'relu', input_shape = ncol(x_train),
+                kernel_initializer = 'uniform') %>%
+    layer_dropout(rate = 0.5) %>%
+    layer_dense(units = 8, activation = 'relu') %>%
+    layer_dropout(rate = 0.25) %>%
+    layer_dense(units = 1, activation = 'sigmoid')
+```
+
+Training the model:
+
+
+```{r, results = 'hide'}
+model %>% compile(
+        loss = 'binary_crossentropy',
+        optimizer = optimizer_rmsprop(),
+        metrics = c('accuracy'))
+
+
+fit_nn <- model %>% 
+    fit(x_train,
+        y_train,
+        epochs = 30,
+        batch_size = 128,
+        class_weight = list('0' = 1, '1' = 1),
+        validation_split = 0.2)
+```
+
+![](../Outputs/fit_oversample_nn1.png)
+
+
+Training Confusion Matrix:
+
+```{r}
+table(predicted = model %>% predict_classes(x_train), true = y_train)
+```
+
+
+Predictions:
+
+```{r}
+model %>% evaluate(x_dev, y_dev)
+
+table(predicted = model %>% predict_classes(x_dev), true = y_dev)
+```
+
+
+##### 6.1.1.2 16x8x8x1, 50 epochs
+
+I've increased the number of epochs. *I did try increasing the learning rate, but it caused problems with convergence*
+
+The current model has high sensitivity but very poor PPV. I could continue trying to tune this to improve my PPV, but I will just move on and try other models.
+
+```{r}
+model_oversampled2 <- keras_model_sequential()
+
+model_oversampled2 %>% 
+    layer_dense(units = 16, activation = 'relu', input_shape = ncol(x_train),
+                kernel_initializer = 'uniform') %>%
+    layer_dropout(rate = 0.5) %>%
+    layer_dense(units = 8, activation = 'relu') %>%
+    layer_dropout(rate = 0.25) %>%
+    layer_dense(units = 8, activation = 'relu') %>%
+    layer_dropout(rate = 0.25) %>%
+    layer_dense(units = 1, activation = 'sigmoid')
+```
+
+Training the model:
+
+```{r, results = 'hide'}
+model_oversampled2 %>% compile(
+        loss = 'binary_crossentropy',
+        optimizer = optimizer_rmsprop(),
+        metrics = c('accuracy'))
+
+
+fit_nn <- model_oversampled2 %>% 
+    fit(x_train,
+        y_train,
+        epochs = 50,
+        batch_size = 128,
+        class_weight = list('0' = 1, '1' = 1),
+        validation_split = 0.2)
+```
+
+![](../Outputs/fit_oversample_nn2.png)
+
+
+Training Confusion Matrix:
+
+```{r}
+table(predicted = model_oversampled2 %>% predict_classes(x_train), true = y_train)
+```
+
+
+Predictions:
+
+```{r}
+model_oversampled2 %>% evaluate(x_dev, y_dev)
+
+table(predicted = model_oversampled2 %>% predict_classes(x_dev), true = y_dev)
+```
+
+
+
+
+
+#### TBC
+
+* Random forest
+
+* Boosted forest
+
+* SVM
+
+
+### 6.2. No Sampling {.tabset}
+
+#### 6.2.1 Neural Network {.tabset}
+
+Prepare data in the proper format for a neural net:
+
+```{r}
+
+
+# Scale the training data
+credit_train_nosample_scaled <- credit_train_nosample %>%
+    mutate(Amount = (Amount - mean(Amount)) / sd(Amount),
+           time_of_day = (time_of_day - mean(time_of_day)) / sd(time_of_day))
+
+# Convert to matrix
+x_train <- as.matrix(subset(credit_train_nosample_scaled, select = -c(Class, Time)))
+y_train <- as.integer(credit_train_nosample_scaled$Class) - 1    # Scales numerics back to 0/1
+
+
+# Scale the dev set (using scaling parameters from the training set)
+credit_dev_scaled <- credit_dev %>%
+    mutate(
+        Amount = (Amount - mean(credit_train_nosample$Amount)) /
+            sd(credit_train_nosample$Amount),
+        time_of_day = (time_of_day - mean(credit_train_nosample$time_of_day)) /
+            sd(credit_train_nosample$time_of_day))
+        
+# Convert to matrix
+x_dev <- as.matrix(subset(credit_dev_scaled, select = -c(Class, Time)))
+y_dev <- as.integer(credit_dev_scaled$Class) - 1    # Scales numerics back to 0/1
+
+```
+
+##### 6.2.1.1 16x8x1, equal weights
+
+* This off-the-rack neural net performs similarly to the random forest, but it does have lower PPV. 
+
+* I can try adjusting the weights.
+
+* I can adjust the layers, or extent of drop-out.
+
+* 30 epochs is definitely plenty, as gains seem to plateau by 10-15 epochs.
+
+
+```{r, results = 'hide'}
+model <- keras_model_sequential()
+
+model %>% 
+    layer_dense(units = 16, activation = 'relu', input_shape = ncol(x_train),
+                kernel_initializer = 'uniform') %>%
+    layer_dropout(rate = 0.5) %>%
+    layer_dense(units = 8, activation = 'relu') %>%
+    layer_dropout(rate = 0.25) %>%
+    layer_dense(units = 1, activation = 'sigmoid')
+```
+
+Training the model:
+
+```{r}
+model %>% compile(
+        loss = 'binary_crossentropy',
+        optimizer = optimizer_rmsprop(),
+        metrics = c('accuracy'))
+
+
+fit_nn <- model %>% 
+    fit(x_train,
+        y_train,
+        epochs = 30,
+        batch_size = 128,
+        class_weight = list('0' = 1, '1' = 1),
+        validation_split = 0.2)
+```
+
+![](../Outputs/fit_nosample_nn1.png)
+
+Training Confusion Matrix:
+
+```{r}
+table(predicted = model %>% predict_classes(x_train), true = y_train)
+```
+
+
+Predictions:
+
+```{r}
+model %>% evaluate(x_dev, y_dev)
+
+table(predicted = model %>% predict_classes(x_dev), true = y_dev)
+```
+
+
+##### 6.2.1.2 16x8x1, unequal weights
+
+I've decreased the dropout in layer 1 and increased the weight of positive events to roughly reflect the disparity in prevalence.
+
+This model scores pretty well on the dev set. Still slightly worse in terms of PPV compared to the best random forest. At this point I feel that the main limitation may be in the data itself--seeing as how we are fighting for 0.1% accuracy.
+
+I will try out other sampling techniques, though I would like to try this model on the test set.
+
+
+```{r, results = 'hide'}
+model_nn_nosample2 <- keras_model_sequential()
+
+model_nn_nosample2 %>% 
+    layer_dense(units = 16, activation = 'relu', input_shape = ncol(x_train),
+                kernel_initializer = 'uniform') %>%
+    layer_dropout(rate = 0.5) %>%
+    layer_dense(units = 8, activation = 'relu') %>%
+    layer_dropout(rate = 0.25) %>%
+    layer_dense(units = 1, activation = 'sigmoid')
+```
+
+Training the model:
+
+```{r}
+model_nn_nosample2 %>% compile(
+        loss = 'binary_crossentropy',
+        optimizer = optimizer_rmsprop(lr = 0.00005),
+        metrics = c('accuracy'))
+
+
+fit_nn <- model_nn_nosample2 %>% 
+    fit(x_train,
+        y_train,
+        epochs = 30,
+        batch_size = 128,
+        class_weight = list('0' = 1, '1' = 500),
+        validation_split = 0.2)
+```
+
+![](../Outputs/fit_nosample_nn2.png)
+
+
+Training Confusion Matrix:
+
+```{r}
+table(predicted = model_nn_nosample2 %>% predict_classes(x_train), true = y_train)
+```
+
+Predictions:
+
+```{r}
+model_nn_nosample2 %>% evaluate(x_dev, y_dev)
+
+table(predicted = model_nn_nosample2 %>% predict_classes(x_dev), true = y_dev)
+```
+
+
+#### TBC
+
+
+### 6.3 SMOTE2
+
+#### 6.3.1 Neural Network
+
+##### 6.3.1.1
+
+
+## 7. Testing
+
+In this section I take a few of my top models so far and make predictions using the final test set. The test errors seen here should be a reflection of the model's performance in the real world.
+
+### 7.2.1 No Sampling, Neural Network
+
+Optimizer: RMS Prop (learning rate = 0.0001)
+```{r}
+summary(model_nn_nosample2)
+```
+
+
+Preparing the test set for prediction:
+
+```{r}
+# Scale the dev set (using scaling parameters from the training set)
+credit_test_scaled <- credit_test %>%
+    mutate(
+        Amount = (Amount - mean(credit_train_nosample$Amount)) /
+            sd(credit_train_nosample$Amount),
+        time_of_day = (time_of_day - mean(credit_train_nosample$time_of_day)) /
+            sd(credit_train_nosample$time_of_day))
+        
+# Convert to matrix
+x_test <- as.matrix(subset(credit_test_scaled, select = -c(Class, Time)))
+y_test <- as.integer(credit_test_scaled$Class) - 1    # Scales numerics back to 0/1
+
+```
+
+
+```{r}
+model_nn_nosample2 %>% evaluate(x_test, y_test)
+
+table(predicted = model_nn_nosample2 %>% predict_classes(x_test), true = y_test)
+```
+
+This model has high accuracy and pretty good PPV, but fairly poor sensitivity. Its usefulness will depend on whether youu are trying to optimize for sensitivity or positive predictive value. When building this model I didn't make a preference for one metric over the other, but in real life I'm sure we would.
