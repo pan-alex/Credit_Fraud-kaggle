@@ -72,10 +72,13 @@ scaleFUN <- function(x) sprintf("%.2f", x)
 
 These data are all PCA variables (i.e., these are not the actual variables)
 ```{r, include = FALSE}
-filepath <- "../Data/creditcard.csv"
+credit_1 <- read_csv("../Data/creditcard_1.csv")
+credit_2 <- read_csv("../Data/creditcard_2.csv")
 
 # Note: Data dims are (300,000, 30)
-credit <- read_csv(filepath)    # This file is not stored on git as it exceeds the file limit.
+credit <- rbind(credit_1, credit_2)
+
+
 credit$Class <- as.factor(credit$Class)
 ```
 

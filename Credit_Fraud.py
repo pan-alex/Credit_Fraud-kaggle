@@ -16,8 +16,10 @@ import keras
 import matplotlib.pyplot as plt
 from Credit_Fraud_functions import *
 
-credit = pd.read_csv('Data/creditcard.csv')
+credit_1 = pd.read_csv('Data/creditcard_1.csv')
+credit_2 = pd.read_csv('Data/creditcard_2.csv')
 
+credit = credit_1.append(credit_2)
 
 # Time represents seconds since 12AM (time 0), spanning over a 48 hour period.
 # Create a new variable that converts these time diffs to hour of the day (as floats)
