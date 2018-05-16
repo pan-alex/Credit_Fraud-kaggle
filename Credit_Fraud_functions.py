@@ -1,3 +1,6 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
 from sklearn.linear_model import LogisticRegression
 
 def auto_grid_search_clf(x_train, y_train,
@@ -33,7 +36,7 @@ def auto_grid_search_clf(x_train, y_train,
     if y_train is not None and y_test is not None: test = True
 
     for score in metrics:
-        clf = GridSearchCV(classifier, parameter_grid, cv=cv, scoring='%s_macro' % score)
+        clf = GridSearchCV(classifier, parameter_grid, cv=cv, scoring=score)
         clf.fit(X=x_train, y=y_train)
         print('Best Parameters')
         print(clf.best_params_)
