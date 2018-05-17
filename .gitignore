@@ -3,6 +3,7 @@
 # Virtual environment #
 env/
 Scripts/
+__pycache__/
 .idea
 .json
 .Rhistory
