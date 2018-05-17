@@ -2,6 +2,22 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from sklearn.linear_model import LogisticRegression
+from textwrap import wrap
+
+def hist_ecdf(var, title=''):
+    import statsmodels.api as sm
+    plt.subplot(121)
+    plt.hist(var)
+    plt.title('\n'.join(wrap(title + ' histogram', 30)))
+
+    plt.subplot(122)
+    ecdf = sm.distributions.ECDF(var)
+    x = np.sort(np.linspace(min(var), max(var), num=len(var)))
+    plt.step(x, ecdf(x))
+    plt.title('\n'.join(wrap(title + ' eCDF', 30)))
+    plt.tight_layout()
+    plt.show()
+
 
 def auto_grid_search_clf(x_train, y_train,
                          parameter_grid,
