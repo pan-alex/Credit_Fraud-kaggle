@@ -4,6 +4,7 @@
 env/
 Scripts/
 __pycache__/
+.ipynb_checkpoints/
 .idea
 .json
 .Rhistory
