@@ -78,7 +78,7 @@ def plot_train_error(x, y, error=None, xlab=''):
     plt.show()
 
 
-def get_variable_importance(model, variables):
+def get_variable_importance(model, variables, type):
     '''
     Create a df containing the coefficient for each variable
     :param model: Classifier from auto_grid_search_clf
@@ -86,8 +86,13 @@ def get_variable_importance(model, variables):
     :return: pd DataFrame containing the coefficient for each variable,
       sorted in descending order by absolute value.
     '''
-    coefficients = pd.Series(model.best_estimator_.coef_.reshape(-1))    # Coefficients from best (training) model
-    variable_importance = pd.concat([variables, coefficients], axis=1)
+    if type.lower() == 'logistic':
+        coefficients = pd.Series(model.best_estimator_.coef_.reshape(-1))    # Coefficients from best (training) model
+        variable_importance = pd.concat([variables, coefficients], axis=1)
+    elif type.lower() == 'rf' or 'random forest':
+        variable_importance = pd.Series(model.best_estimator_.feature_importances_.reshape(-1))
+        variable_importance = pd.concat([variables, variable_importance], axis = 1)
+
     # Sort the coefficients by absolute value
     variable_importance['sort'] = variable_importance[1].abs()
     variable_importance = variable_importance.sort_values('sort', ascending=False).drop('sort', axis=1)
@@ -95,18 +100,18 @@ def get_variable_importance(model, variables):
     return variable_importance
 
 
-def plot_varimp_logistic(model, variables):
+def plot_varimp(model, variables, type ='logistic'):
     '''
     :inputs: See get_variable_importance()
     :return: None; displays a plot of variable importance
     '''
-    variable_importance = get_variable_importance(model, variables)
+    variable_importance = get_variable_importance(model, variables, type)
 
     colours = np.where(variable_importance[1] > 0, 'blue', 'red')
     plt.bar(variable_importance[0], abs(variable_importance[1]), color=colours,
             alpha = 0.5)
     plt.xticks(rotation=90)
-    plt.title('Variable Importance: L1 Logistic Regression')
+    plt.title('Variable Importance: {}'.format(type))
     plt.show()
 
 
@@ -121,4 +126,65 @@ def plot_precision_recall(y_pred, y_test):
     plt.xlabel('Recall')
     plt.ylabel('Precision')
     plt.title('Precision vs. Recall; Average Precision:{0:0.2f}'.format(average_precision))
+    plt.show()
+
+
+
+
+def f1_score(y_true, y_pred):
+    # from SO (https://stackoverflow.com/questions/43547402/how-to-calculate-f1-macro-in-keras)
+    import keras.backend as K
+    def recall(y_true, y_pred):
+        """Recall metric.
+
+        Only computes a batch-wise average of recall.
+
+        Computes the recall, a metric for multi-label classification of
+        how many relevant items are selected.
+        """
+        true_positives = K.sum(K.round(K.clip(y_true * y_pred, 0, 1)))
+        possible_positives = K.sum(K.round(K.clip(y_true, 0, 1)))
+        recall = true_positives / (possible_positives + K.epsilon())
+        return recall
+
+    def precision(y_true, y_pred):
+        """Precision metric.
+
+        Only computes a batch-wise average of precision.
+
+        Computes the precision, a metric for multi-label classification of
+        how many selected items are relevant.
+        """
+        true_positives = K.sum(K.round(K.clip(y_true * y_pred, 0, 1)))
+        predicted_positives = K.sum(K.round(K.clip(y_pred, 0, 1)))
+        precision = true_positives / (predicted_positives + K.epsilon())
+        return precision
+    precision = precision(y_true, y_pred)
+    recall = recall(y_true, y_pred)
+
+    return 2*((precision*recall)/(precision+recall+K.epsilon()))
+
+
+def plot_nn_error(history):
+    '''
+    :param history: History of the trained model
+
+    :return: Plots of F1 score and loss
+    '''
+    plt.subplot(211)
+    plt.plot(history.history['f1_score'])
+    plt.plot(history.history['val_f1_score'])
+    plt.title('F1 score')
+    plt.ylabel('F1')
+    plt.xlabel('epoch')
+    plt.legend(['train', 'test'], loc='upper left')
+
+    plt.subplot(212)
+    # summarize history for loss
+    plt.plot(history.history['loss'])
+    plt.plot(history.history['val_loss'])
+    plt.title('model loss')
+    plt.ylabel('loss')
+    plt.xlabel('epoch')
+    plt.legend(['train', 'test'], loc='upper left')
     plt.show()
