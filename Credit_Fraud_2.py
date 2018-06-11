@@ -20,7 +20,11 @@ print(credit_train_x_smote.shape)
 ##
 
 # Random Forest
-clf_rf_smotesvm = auto_grid_search_clf(x_train=credit_train_x_smote_svm,
+rf_param_grid = [{'n_estimators': [500], 'criterion': ['gini'],
+                 'max_features': [1, 2, 4, 8],}]
+scores = ['f1_macro']
+
+clf_rf_smote_svm = auto_grid_search_clf(x_train=credit_train_x_smote_svm,
                                        y_train=credit_train_y_smote_svm,
                                        parameter_grid=rf_param_grid,
                                        classifier=RandomForestClassifier(),
@@ -29,47 +33,72 @@ clf_rf_smotesvm = auto_grid_search_clf(x_train=credit_train_x_smote_svm,
                                        metrics=scores)
 
 ## Confusion matrix
-confusion_matrix(credit_dev_y, clf_rf_smotesvm.predict(credit_dev_x))
+confusion_matrix(credit_dev_y, clf_rf_smote_svm.predict(credit_dev_x))
 
 ## Plot Performance vs. lambda
 plot_train_error(pd.Series(rf_param_grid[0]['max_features']),
-                 clf_rf_smotesvm.cv_results_['mean_test_score'],
-                 error=clf_rf_smotesvm.cv_results_['std_test_score'],
+                 clf_rf_smote_svm.cv_results_['mean_test_score'],
+                 error=clf_rf_smote_svm.cv_results_['std_test_score'],
                  xlab='max features')
 
 ## Plot variable importance
-plot_varimp(clf_rf_smotesvm, variable_names, type ='Random Forest')
+plot_varimp(clf_rf_smote_svm, variable_names, type ='Random Forest')
 
 ## Plot precision vs. recall curve
-plot_precision_recall(clf_rf_smotesvm.predict(credit_dev_x), credit_dev_y)
+plot_precision_recall(clf_rf_smote_svm.predict(credit_dev_x), credit_dev_y)
 
 
 # Neural Nets
-model_nn_smotesvm = Sequential()
-model_nn_smotesvm.add(Dense(units=64, activation='relu', input_dim=len(variable_names)))
-model_nn_smotesvm.add(Dropout(0.5))
-model_nn_smotesvm.add(Dense(units=10, activation='sigmoid'))
-model_nn_smotesvm.add(Dropout(0.5))
-model_nn_smotesvm.add(Dense(units=1, activation='sigmoid'))
+model_nn_smote_svm = Sequential()
+model_nn_smote_svm.add(Dense(units=64, activation='relu', input_dim=len(variable_names)))
+model_nn_smote_svm.add(Dropout(0.5))
+model_nn_smote_svm.add(Dense(units=16, activation='sigmoid'))
+model_nn_smote_svm.add(Dropout(0.25))
+model_nn_smote_svm.add(Dense(units=6, activation='sigmoid'))
+model_nn_smote_svm.add(Dropout(0.125))
+model_nn_smote_svm.add(Dense(units=1, activation='sigmoid'))
 
-model_nn_smotesvm.compile(loss='binary_crossentropy',
-              optimizer=keras.optimizers.rmsprop(lr=0.001),
+model_nn_smote_svm.compile(loss='binary_crossentropy',
+              optimizer=keras.optimizers.rmsprop(lr=0.005),
               metrics=['accuracy', f1_score])
 
-fit_nn_smotesvm = model_nn_smotesvm.fit(credit_train_x_smote_svm,
+fit_nn_smote_svm = model_nn_smote_svm.fit(credit_train_x_smote_svm,
                    credit_train_y_smote_svm,
                    validation_split= 0.2,
                    epochs=100,
-                   batch_size=16384,
-                   class_weight={0:1, 1:4})
+                   batch_size=512,
+                   class_weight={0:1, 1:1},
+                   verbose=2)
 
-pred_nn_smotesvm = model_nn_smotesvm.predict(credit_dev_x, batch_size = 128)
+pred_nn_smote_svm = model_nn_smote_svm.predict(credit_dev_x, batch_size = 1024)
 
-plot_nn_error(fit_nn_smotesvm)
+plot_nn_error(fit_nn_smote_svm)
 
-confusion_matrix((pred_nn_smotesvm > 0.5), credit_dev_y)
+confusion_matrix((pred_nn_smote_svm > 0.5), credit_dev_y)
+
+
+
 
 # SVM
+# Linear SVM
+from sklearn.svm import LinearSVC, SVC
+clf_svm_smote_svm = LinearSVC()
+clf_svm_smote_svm.fit(credit_train_x_smote_svm, credit_train_y_smote_svm)
+
+pred = clf_svm_smote_svm.predict(credit_dev_x)
+confusion_matrix(credit_dev_y, pred)
+
+plot_precision_recall(pred, credit_dev_y)
+
+
+# Radial Basis Function kernel SVM
+clf_svmRBF_smote_svm = SVC(kernel='rbf')
+clf_svmRBF_smote_svm.fit(credit_train_x_smote_svm, credit_train_y_smote_svm)
+
+pred = clf_svmRBF_smote_svm.predict(credit_dev_x)
+confusion_matrix(credit_dev_y, pred)
+
+plot_precision_recall(pred, credit_dev_y)
 
 #####################
 
@@ -87,7 +116,7 @@ from sklearn.ensemble import RandomForestClassifier
 # Implicitly weigh Class 1 4x more than class 0
 rf_param_grid = [{'n_estimators': [500], 'criterion': ['gini'],
                  'max_features': [1, 2, 4, 8], 'class_weight': [{0:1, 1:4}]}]
-scores = ['f1_macro']
+
 clf_rf_nosample = auto_grid_search_clf(x_train=credit_train_cut_x,
                                        y_train=credit_train_cut_y,
                                        parameter_grid=rf_param_grid,
