@@ -19,9 +19,9 @@ arranged so that the data can be imported into another script without running
 the models
 '''
 
-import random
+
 rand_state = 123456
-random.seed(rand_state)
+np.random.seed(rand_state)
 from Credit_Fraud_functions import *
 from sklearn.metrics import confusion_matrix
 
@@ -42,9 +42,17 @@ credit['time_of_day'] = np.where(credit['Time'] > 86400,
 credit = credit.drop('Time', axis=1)
 
 
+
 ##
 ### Data Partitioning
 ##
+
+# Before partitioning the data, standardize the scale of the variables
+from sklearn.preprocessing import RobustScaler
+scaler = RobustScaler(with_centering=True, with_scaling=True)
+
+credit = pd.DataFrame(scaler.fit_transform(credit), columns=credit.columns)
+
 
 # Divide into train, dev, and test sets
 from sklearn.model_selection import train_test_split
